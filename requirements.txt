@@ -1,0 +1,8 @@
+nibabel
+numpy
+getopt
+pandas
+csv
+scipy
+pylab
+skimage
