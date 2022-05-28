@@ -86,36 +86,17 @@ class MorphologyOps(object):
         return ndimage.label(self.binary_map, struct)
 
 
-class PairwiseMeasures(object):
-    def __init__(self, ref_img, seg_img, analysis='lacunes',
+class PairwiseUncertainty(object):
+    def __init__(self, ref_img, seg_img, uncert_img, analysis='lacunes',
                  measures=None, connectivity=3, pixdim=[1, 1, 1],
                  empty=False, list_labels=None, threshold=0.5, thresh_assign=0.1):
 
         # define metric functions and labels
         self.m_dict = {
-            'f1_score': (self.f1_count_element, 'F1 score'),
-            'absolute_volume_difference': (self.absolute_vol_difference, 'absolute volume difference'),
-            'absolute_count_difference': (self.absolute_difference, 'absolute difference'),
-            'mean_diceimage': (self.mean_dsc_perimage, 'mean dice'),
-            'mean_diceover': (self.mean_dsc_whenoverlap, 'mean dice'),
-            'vol_difference': (self.vol_difference, 'volume difference'),
-            'vol_ref': (self.vol_ref, 'volume reference'),
-            'vol_seg': (self.vol_seg, 'volume segmentation'),
-            'count_difference': (self.count_difference, 'count difference'),
-            'count_ref': (self.count_ref, 'count reference'),
-            'count_seg': (self.count_seg, 'count segmentation'),
-            'median_vol_ref': (self.median_vol_ref, 'median volume ref'),
-            'min_vol_ref': (self.min_vol_ref, 'min volume ref'),
-            'max_vol_ref': (self.max_vol_ref, 'max volume ref'),
-            'median_vol_seg': (self.median_vol_seg, 'median volume seg'),
-            'min_vol_seg': (self.min_vol_seg, 'min volume seg'),
-            'max_vol_seg': (self.max_vol_seg, 'max volume seg'),
-            'numb_tp': (self.numb_tp, 'number TP'),
-            'numb_fp': (self.numb_fp, 'number FP'),
-            'numb_fn': (self.numb_fn, 'number FN'),
-            'overall_dsc': (self.overall_dsc, 'overall DSC'),
-            'disagreement_vol_raters': (self.disagreement_vol_raters, 'volume rater disagreement'),
-            'disagreement_numb_raters': (self.disagreement_numb_raters, 'number rater disagreement')
+            'f1_count_uncert': (self.f1_count_uncert, 'F1 score'),
+            'mean_dsc_uncertainty': (self.mean_dsc_uncertainty, 'Mean DSC Unc'),
+            'f1_count_uncert_seg': (self.f1_count_uncert_seg, 'F1 seg score'),
+            'mean_dsc_uncertainty_seg': (self.mean_dsc_uncertainty_seg, 'Mean DSC SegUnc')
         }
         self.threshold = threshold
         self.thresh_assign = thresh_assign
@@ -131,6 +112,7 @@ class PairwiseMeasures(object):
 
             # original prediction image, voxels have values ranging between 0 and 1
             self.seg_img = seg_img.copy()
+            self.seg_uncert = uncert_img
 
             # remove decompression errors when loading nifti, voxel have values 0 or 1
             self.ref = np.around(ref_img, decimals=1)
@@ -145,7 +127,7 @@ class PairwiseMeasures(object):
             # get connected components maps
             self.seg_cc = MorphologyOps(self.seg_binary.astype(bool), self.connectivity).foreground_component()[0]
             self.ref_cc = MorphologyOps(self.ref.astype(bool), self.connectivity).foreground_component()[0]
-
+            self.ref_uncert = self.create_uncertainty_map()
             # check special cases
             #   case reference is empty (all false positive)
             self.flag_ref_empty = np.sum(self.ref) == 0
@@ -155,29 +137,32 @@ class PairwiseMeasures(object):
             if self.flag_seg_empty:
                 print('WARNING: segmentation empty, all elements in ref are false negatives')
                 self.df_classif = self.all_fn()
-                self.list_segv = []
-                self.list_refv = self.volume_elements_ref()
 
             elif self.flag_ref_empty:
                 print('WARNING: reference empty, all elements in seg are false positives')
                 self.df_classif = self.all_fp()
-                self.list_segv = self.volume_elements_seg()
-                self.list_refv = []
 
-            elif analysis in ['epvs', 'demographic_iou']:
+            elif analysis == 'epvs':
                 self.df_classif = self.assign_tp_fp()
-                self.list_segv = self.volume_elements_seg()
-                self.list_refv = self.volume_elements_ref()
-            elif analysis in ['lacunes', 'microbleeds','demographic_dist']:
+            elif analysis in ['lacunes', 'microbleeds']:
                 self.df_classif = self.assign_tp_fp_distance()
-                self.list_segv = self.volume_elements_seg()
-                self.list_refv = self.volume_elements_ref()
             else:
                 raise ValueError("Wrong task given: " + analysis)
 
             assert len(self.df_classif) == np.amax(self.seg_cc), \
                 "Error df_classif has %d elements and prediction map has %d" % (len(self.df_classif),
                                                                                 np.amax(self.seg_cc))
+    def create_uncertainty_map(self):
+        '''
+        Given a probabilistic reference image create the associated uncertainty map
+        '''
+        uncert_map = np.ones_like(self.ref) * -1.0
+        for r in range(1, np.max(self.ref_cc)):
+            ref_temp = np.where(self.ref_cc==r, self.ref, np.zeros_like(self.ref))
+            uncert_temp = ref_temp * -2.0 + 3
+            uncert_map += uncert_temp
+        return uncert_map
+
 
     def all_fp(self):
         '''
@@ -212,18 +197,18 @@ class PairwiseMeasures(object):
             temp_ref = np.where(label_ref==r, np.ones_like(label_ref), np.zeros_like(label_ref))
             com_tmp = ndimage.center_of_mass(temp_ref)
             com_ref['label'] = r
-            com_ref['x'] = com_tmp[0] * self.pixdim[0]
-            com_ref['y'] = com_tmp[1] * self.pixdim[1]
-            com_ref['z'] = com_tmp[2] * self.pixdim[2]
+            com_ref['x'] = com_tmp[0]
+            com_ref['y'] = com_tmp[1]
+            com_ref['z'] = com_tmp[2]
             list_com_ref.append(com_ref)
         for s in range(1, np.max(label_seg) + 1):
             com_seg = {}
-            temp_seg = np.where(label_seg==s, np.ones_like(label_seg), np.zeros_like(label_seg))
+            temp_seg = np.where(label_seg==s,np.ones_like(label_seg), np.zeros_like(label_seg))
             com_tmp = ndimage.center_of_mass(temp_seg)
             com_seg['label'] = s
-            com_seg['x'] = com_tmp[0] * self.pixdim[0]
-            com_seg['y'] = com_tmp[1] * self.pixdim[1]
-            com_seg['z'] = com_tmp[2] * self.pixdim[2]
+            com_seg['x'] = com_tmp[0]
+            com_seg['y'] = com_tmp[1]
+            com_seg['z'] = com_tmp[2]
             list_com_seg.append(com_seg)
         df_seg = pd.DataFrame.from_dict(list_com_seg)
         df_ref = pd.DataFrame.from_dict(list_com_ref)
@@ -278,12 +263,11 @@ class PairwiseMeasures(object):
         df_complex['category'] = np.where(df_complex['distance'] >= self.thresh_assign, 'FP', df_complex['category'])
         if df_easy.shape[0] == 0:
             return df_complex
-        elif df_complex.shape[0] ==0:
+        elif df_complex.shape[0] == 0:
             return df_easy
         else:
             df_total = pd.concat([df_easy, df_complex])
             return df_total
-
 
     def assign_tp_fp(self):
         print('Using IOU threshold')
@@ -349,67 +333,29 @@ class PairwiseMeasures(object):
         df_complex = df_matching[df_matching['count_ref'] > 1].copy()
 
         # assign FP/TP: easy cases (ref element matched with only 1 predicted element)
-        if df_easy.shape[0] > 0:
-            df_easy['category'] = np.where(df_easy['iou'] > self.thresh_assign, 'TP', 'FP')
-            df_easy['category'] = np.where(df_easy['ref'] == 0, 'FP', df_easy['category'])
+        df_easy['category'] = np.where(df_easy['iou'] > self.thresh_assign, 'TP', 'FP')
+        df_easy['category'] = np.where(df_easy['ref'] == 0, 'FP', df_easy['category'])
 
         # assign FP/TP: complex cases (ref element matched with multiple predictions)
-        if df_complex.shape[0] > 0:
-            df_complex['category'] = np.where(df_complex['ref'] == 0, 'FP', df_complex['category'])
-            df_complex['category'] = np.where(df_complex['iou'] > self.thresh_assign, 'TP', df_complex['category'])
+        df_complex['category'] = np.where(df_complex['ref'] == 0, 'FP', df_complex['category'])
+        df_complex['category'] = np.where(df_complex['iou'] > self.thresh_assign, 'TP', df_complex['category'])
 
         # choose element with highest iou
-            df_complex['max_iou'] = df_complex.groupby('ref')['iou'].transform('max')
-            df_complex['category'] = np.where(df_complex['iou'] == df_complex['max_iou'], 'TP', 'FP')
+        df_complex['max_iou'] = df_complex.groupby('ref')['iou'].transform('max')
+        df_complex['category'] = np.where(df_complex['iou'] == df_complex['max_iou'], 'TP', 'FP')
         # only TP if higher than iou
-            df_complex['category'] = np.where(df_complex['iou'] <= self.thresh_assign, 'FP', df_complex['category'])
+        df_complex['category'] = np.where(df_complex['iou'] <= self.thresh_assign, 'FP', df_complex['category'])
 
-            df_complex['category'] = np.where(df_complex['ref'] == 0, 'FP', df_complex['category'])
+        df_complex['category'] = np.where(df_complex['ref'] == 0, 'FP', df_complex['category'])
 
-            df_complex['category'] = np.where(df_complex['category'] == 'PossibleTP', 'FP', df_complex['category'])
+        df_complex['category'] = np.where(df_complex['category'] == 'PossibleTP', 'FP', df_complex['category'])
         if df_easy.shape[0] == 0:
             return df_complex
-        elif df_complex.shape[0] ==0:
+        elif df_complex.shape[0] == 0:
             return df_easy
         else:
             df_total = pd.concat([df_easy, df_complex])
             return df_total
-
-    def numb_tp(self):
-        return self.df_classif[self.df_classif['category']=='TP'].shape[0]
-
-    def numb_fn(self):
-        label_ref = self.ref_cc
-        return np.max(label_ref) - len(np.unique(self.df_classif['ref']))
-
-    def numb_fp(self):
-        return self.df_classif[self.df_classif['category']=='FP'].shape[0]
-
-    def disagreement_vol_raters(self):
-        disagreement = np.where(self.ref==0.5,np.ones_like(self.ref), np.zeros_like(self.ref))
-        sum_dis = np.sum(disagreement)
-        volume_voxel = np.prod(self.pixdim)
-        vol_dis = volume_voxel * sum_dis
-        return vol_dis
-
-    def disagreement_numb_raters(self):
-        label_ref = self.ref_cc
-        count_disagreeing = 0
-        for r in range(1, np.max(label_ref)+1):
-            ref_temp = np.where(label_ref == r, self.ref, np.zeros_like(self.ref))
-            max_reft = np.amax(ref_temp)
-            if max_reft < 0.75:
-                count_disagreeing+=1
-        return count_disagreeing
-
-    def overall_dsc(self):
-        if np.sum(self.seg_clipped) >0 or np.sum(self.ref) > 0:
-            dsc = (2. * np.sum(self.seg_clipped * self.ref)) / (np.sum(self.seg_clipped) + np.sum(self.ref))
-            return dsc
-        else:
-            return np.nan
-
-
 
     def mean_dsc_perimage(self):
         # not used in ranking, but included for extra insight
@@ -428,13 +374,54 @@ class PairwiseMeasures(object):
             list_dsc.append(dsc_temp)
         return np.mean(np.asarray(list_dsc))
 
-    def mean_dsc_whenoverlap(self):
-        print('Computing DSC when Overlap')
-        # used for ranking
 
-        # both ref/rater and segmentation/prediction images are assumed binary, using the connected components maps
+    def mean_dsc_uncertainty(self):
+        df_classif = self.df_classif
+        label_seg = self.seg_cc
+        label_ref = self.ref_cc
+        uncert_seg = self.seg_uncert
+        uncert_ref = self.ref_uncert
+        df_classif = self.df_classif
+        label_seg = self.seg_cc
+        label_ref = self.ref_cc
 
-        # TODO check if rater agreement weights make sense when used like this
+        if self.flag_ref_empty:
+            # case reference empty and seg may have something (all false positive)
+            return np.nan
+        elif self.flag_seg_empty:
+            # case segmentation is empty & ref not empty (all false negative)
+            return 0
+
+        list_dsc = []
+
+        df_classif_tp = df_classif.loc[df_classif['category'] == 'TP']
+        unique_ref = np.unique(df_classif_tp['ref'])
+        # skip background label
+        unique_ref = unique_ref[unique_ref > 0]
+
+        # loop over TP ref elements
+        # any predictions that overlap with the ref element are taken into account when computing the dsc
+        for r in unique_ref:
+            list_seg = np.asarray(df_classif[df_classif['ref'] == r]['seg'])
+            temp_ref = np.where(label_ref == r, self.ref_uncert, np.zeros_like(label_ref))
+            temp_seg = np.zeros_like(self.seg_uncert)
+            if len(list_seg) > 0:
+                for s in list_seg:
+                    temp_seg += np.where(label_seg == s, self.seg_uncert, np.zeros_like(label_seg))
+                # DSC = 2 TP / (2TP + FP + FN) = 2 * sum(seg * ref) / (sum(seg) + sum(ref))
+                dsc_temp = (2. * np.sum(temp_seg * temp_ref)) / (np.sum(temp_seg) + np.sum(temp_ref))
+                list_dsc.append(dsc_temp)
+        if len(list_dsc) > 0:
+            return np.mean(np.asarray(list_dsc))
+        else:
+            # when there is no associated  segmentation or reference overlapping
+            return 0
+
+    def mean_dsc_uncertainty_seg(self):
+        df_classif = self.df_classif
+        label_seg = self.seg_cc
+        label_ref = self.ref_cc
+        uncert_seg = self.seg_uncert
         df_classif = self.df_classif
         label_seg = self.seg_cc
         label_ref = self.ref_cc
@@ -458,136 +445,153 @@ class PairwiseMeasures(object):
         for r in unique_ref:
             list_seg = np.asarray(df_classif[df_classif['ref'] == r]['seg'])
             temp_ref = np.where(label_ref == r, self.ref, np.zeros_like(label_ref))
-            temp_seg = np.zeros_like(label_seg)
+            temp_seg = np.zeros_like(self.seg_uncert)
+            temp_uncert_seg = np.zeros_like(self.seg_uncert)
+            temp_uncert_ref = np.where(label_ref == r, self.seg_uncert, np.zeros_like(self.seg_uncert))
             if len(list_seg) > 0:
                 for s in list_seg:
-                    temp_seg += np.where(label_seg == s, np.ones_like(label_seg), np.zeros_like(label_seg))
+                    temp_seg += np.where(label_seg == s, self.seg_clipped, np.zeros_like(label_seg))
+                    temp_uncert_seg += np.where(label_seg==s, self.seg_uncert, np.zeros_like(self.seg_uncert))
                 # DSC = 2 TP / (2TP + FP + FN) = 2 * sum(seg * ref) / (sum(seg) + sum(ref))
-                dsc_temp = (2. * np.sum(temp_seg * temp_ref)) / (np.sum(temp_seg) + np.sum(temp_ref))
-                list_dsc.append(dsc_temp)
+                temp_uncert = np.where(temp_uncert_ref>temp_uncert_seg,temp_uncert_ref, temp_uncert_seg)
+                tps = np.where(np.logical_and(temp_seg>=0.5, temp_ref>=0.5), np.ones_like(temp_seg), np.zeros_like(temp_seg))
+                error_fp = np.where(np.logical_and(temp_seg>=0.5, temp_ref<0.5), np.ones_like(temp_seg), np.zeros_like(temp_seg))
+                error_fn = np.where(np.logical_and(temp_seg < 0.5, temp_ref >= 0.5), np.ones_like(temp_seg),
+                                    np.zeros_like(temp_seg))
+                error = error_fp + error_fn
+                acc_temp = (np.sum((1.0-temp_uncert)*tps) + np.sum(temp_uncert*error))/(np.sum(error) + np.sum(tps))
+
+                list_dsc.append(acc_temp)
         if len(list_dsc) > 0:
             return np.mean(np.asarray(list_dsc))
         else:
             # when there is no associated  segmentation or reference overlapping
-            return 0.
+            return 0
 
-    def volume_elements_ref(self):
+    def f1_count_uncert_seg(self):
         label_ref = self.ref_cc
-        list_volume = []
-        volume_voxel = np.prod(self.pixdim)
-        for r in range(1,np.max(label_ref)+1):
-            ref_temp = np.where(label_ref == r, self.ref, np.zeros_like(self.ref))
-            vol_temp = float(np.sum(ref_temp)) * volume_voxel
-            list_volume.append(vol_temp)
-        return list_volume
+        df_classif = self.df_classif
+        # if self.flag_ref_empty:
+        #     # case reference empty and seg may have something (all false positive)
+        #     return np.nan
+        # elif self.flag_seg_empty:
+        #     # case segmentation is empty & ref not empty (all false negative)
+        #     return 0
 
-    def volume_elements_seg(self):
-        label_seg = self.seg_cc
-        list_volume = []
-        volume_voxel = np.prod(self.pixdim)
-        for r in range(1, np.max(label_seg) + 1):
-            ref_temp = np.where(label_seg == r, self.seg_clipped, np.zeros_like(self.seg_clipped))
-            vol_temp = float(np.sum(ref_temp)) * volume_voxel
-            list_volume.append(vol_temp)
-        return list_volume
+        if self.flag_ref_empty and self.flag_seg_empty:
+            return 1
+        if self.flag_seg_empty and not self.flag_ref_empty:
+            return 0
 
-    def count_ref(self):
+        TP = df_classif[df_classif['category'] == 'TP']
+        FP = df_classif[df_classif['category'] == 'FP']
+        count_tp = 0
+        count_error = 0
+        list_ref_fn = [r for r in range(1,np.max(self.ref_cc)) if r not in list(df_classif['ref'])]
+        if len(list_ref_fn) > 0:
+            for n in range(0, len(list_ref_fn)):
+                fn = list_ref_fn[n]
+                ref_temp = np.where(self.ref_cc == fn, np.ones_like(self.seg_uncert), np.zeros_like(self.seg_uncert))
+                seg_temp = np.where(self.ref_cc == fn, self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp) / np.count_nonzero(ref_temp)
+                if mean_seg_uncert < 0.5:
+                    count_error += 1
+                else:
+                    count_tp += 1
+        if FP.shape[0] > 0:
+            for f in range(0, FP.shape[0]):
+                fp = FP.iloc[f]
+                seg_temp = np.where(self.seg_cc == fp['seg'], self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp) / np.count_nonzero(seg_temp)
+                if mean_seg_uncert < 0.5:
+                    count_error += 1
+                else:
+                    count_tp += 1
+        if TP.shape[0] > 0:
+            for p in range(0, TP.shape[0]):
+                tp = TP.iloc[p]
+                seg_temp = np.where(self.seg_cc == tp['seg'], self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp) / np.count_nonzero(seg_temp)
+                if mean_seg_uncert < 0.5:
+                    count_tp += 1
+                else:
+                    count_error += 1
+        return count_tp / ( count_tp + count_error)
+
+    def f1_count_uncert(self):
         label_ref = self.ref_cc
-        return np.max(label_ref)
+        df_classif = self.df_classif
+        # if self.flag_ref_empty:
+        #     # case reference empty and seg may have something (all false positive)
+        #     return np.nan
+        # elif self.flag_seg_empty:
+        #     # case segmentation is empty & ref not empty (all false negative)
+        #     return 0
 
-    def count_seg(self):
-        label_seg = self.seg_cc
-        return np.max(label_seg)
+        if self.flag_ref_empty and self.flag_seg_empty:
+            return 1
+        if self.flag_seg_empty and not self.flag_ref_empty:
+            return 0
 
-    def vol_ref(self):
-        ref = self.ref
-        sum_ref = np.sum(ref)
-        volume_voxel = np.prod(self.pixdim)
-        return volume_voxel * sum_ref
 
-    def vol_seg(self):
-        seg = self.seg_clipped
-        sum_seg = np.sum(seg)
-        volume_voxel = np.prod(self.pixdim)
-        return sum_seg * volume_voxel
+        TP = df_classif[df_classif['category'] == 'TP']
+        FP = df_classif[df_classif['category'] == 'FP']
+        count_tp = 0
+        count_error = 0
+        list_ref_fn = [r for r in range(1,np.max(self.ref_cc)) if r not in list(df_classif['ref'])]
+        if len(list_ref_fn) > 0:
+            for n in range(0,len(list_ref_fn)):
+                fn = list_ref_fn[n]
+                ref_ref = np.where(self.ref_cc == fn, np.ones_like(self.ref), np.zeros_like(self.ref))
 
-    def absolute_difference(self):
-        print('Computing Count Diff')
-        label_ref = self.ref_cc
-        label_seg = self.seg_cc
-        return np.abs(np.max(label_ref) - np.max(label_seg))
-
-    def count_difference(self):
-        label_ref = self.ref_cc
-        label_seg = self.seg_cc
-        return np.max(label_ref) - np.max(label_seg)
-
-    def vol_difference(self):
-        ref = self.ref
-        seg = self.seg_clipped
-        sum_ref = np.sum(ref)
-        sum_seg = np.sum(seg)
-        difference = float(sum_seg) - float(sum_ref)
-        volume_voxel = np.prod(self.pixdim)
-        return difference * volume_voxel
-
-    def absolute_vol_difference(self):
-        print('Computing Volume Diff')
-        # compute volume over clipped predicted maps
-        ref = self.ref
-        seg = self.seg_clipped
-        sum_ref = np.sum(ref)
-        sum_seg = np.sum(seg)
-        difference = np.abs(float(sum_seg) - float(sum_ref))
-        volume_voxel = np.prod(self.pixdim)
-        return difference * volume_voxel
-
-    def median_vol_ref(self):
-        list_vol_ref = self.list_refv
-        if len(list_vol_ref) > 0:
-            return np.quantile(list_vol_ref, 0.5)
-        else:
-            return np.nan
-
-    def min_vol_ref(self):
-        list_vol_ref = self.list_refv
-        if len(list_vol_ref) > 0:
-            return np.amin(list_vol_ref)
-        else:
-            return np.nan
-
-    def max_vol_ref(self):
-        list_vol_ref = self.list_refv
-        if len(list_vol_ref) > 0:
-            return np.amax(list_vol_ref)
-        else:
-            return np.nan
-
-    def median_vol_seg(self):
-        list_vol_seg = self.list_segv
-        if len(list_vol_seg) > 0:
-            return np.quantile(list_vol_seg, 0.5)
-        else:
-            return np.nan
-
-    def min_vol_seg(self):
-        list_vol_seg = self.list_segv
-        if len(list_vol_seg) > 0:
-            return np.min(list_vol_seg)
-        else:
-            return np.nan
-
-    def max_vol_seg(self):
-        list_vol_seg = self.list_segv
-        if len(list_vol_seg) > 0:
-            return np.max(list_vol_seg)
-        else:
-            return np.nan
+                ref_temp = np.where(self.ref_cc==fn, self.ref_uncert, np.zeros_like(self.ref))
+                seg_temp = np.where(self.ref_cc==fn, self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp)/np.count_nonzero(ref_ref)
+                mean_ref_uncert = np.sum(ref_temp)/np.count_nonzero(ref_ref)
+                if mean_seg_uncert <0.5:
+                    count_error +=1
+                elif mean_ref_uncert < 0.5:
+                    count_error +=1
+                else:
+                    count_tp +=1
+        if FP.shape[0] > 0:
+            for p in range(0, FP.shape[0]):
+                fp = FP.iloc[p]
+                seg_ref = np.where(self.seg_cc == fp['seg'], np.ones_like(self.ref), np.zeros_like(self.ref))
+                ref_temp = np.where(self.seg_cc == fp['seg'], self.ref_uncert, np.zeros_like(self.ref))
+                seg_temp = np.where(self.seg_cc == fp['seg'], self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp) / np.count_nonzero(seg_ref)
+                mean_ref_uncert = np.sum(ref_temp) / np.count_nonzero(seg_ref)
+                if mean_seg_uncert > 0.5 and mean_ref_uncert > 0.5:
+                    count_tp +=1
+                elif mean_seg_uncert < 0.5 and mean_ref_uncert <0.5:
+                    count_tp +=1
+                elif mean_seg_uncert > 0.5 and mean_ref_uncert <0.5:
+                    count_error +=1
+                else:
+                    count_error +=1
+        if TP.shape[0] > 0:
+            for p in range(0, TP.shape[0]):
+                tp = TP.iloc[p]
+                seg_ref = np.where(self.seg_cc == tp['seg'], np.ones_like(self.ref), np.zeros_like(self.ref))
+                ref_ref = np.where(self.ref_cc == tp['ref'], np.ones_like(self.ref), np.zeros_like(self.ref))
+                ref_temp = np.where(self.ref_cc == tp['ref'], self.ref_uncert, np.zeros_like(self.ref))
+                seg_temp = np.where(self.seg_cc == tp['seg'], self.seg_uncert, np.zeros_like(self.ref))
+                mean_seg_uncert = np.sum(seg_temp) / np.count_nonzero(seg_ref)
+                mean_ref_uncert = np.sum(ref_temp) / np.count_nonzero(ref_ref)
+                if mean_seg_uncert > 0.5 and mean_ref_uncert > 0.5:
+                    count_tp +=1
+                elif mean_seg_uncert < 0.5 and mean_ref_uncert <0.5:
+                    count_tp +=1
+                elif mean_seg_uncert > 0.5 and mean_ref_uncert <0.5:
+                    count_error +=1
+                else:
+                    count_error +=1
+        return count_tp / (count_tp + count_error)
 
 
 
     def f1_count_element(self):
-        print('Computing F1')
         label_ref = self.ref_cc
         df_classif = self.df_classif
 
@@ -598,37 +602,12 @@ class PairwiseMeasures(object):
             # case segmentation is empty & ref not empty (all false negative)
             return 0
 
-        for t in range(0, df_classif.shape[0]):
-            tp = df_classif.iloc[t]
-            if tp['category'] == 'TP':
-                # First check if TP otherwise do not need to compute weight
-                ref_temp = np.where(self.ref_cc == tp['ref'], self.ref, np.zeros_like(self.ref))
-                df_classif.at[t, 'weight'] = float(np.max(ref_temp))
-            else:
-                # FP get weight of 1
-                # This is currently not used but otherwise the weight column is not initialized
-                df_classif.at[t, 'weight'] = 1.0
-
-        list_ref_matched = list(df_classif['ref'])
-        weighted_fn = 0
-        nr_fn = 0
-        for r in range(1, np.max(label_ref)+1):
-            if r not in list_ref_matched:
-                nr_fn += 1
-                ref_temp = np.where(label_ref==r, self.ref, np.zeros_like(self.ref))
-                weighted_fn += np.max(ref_temp)
-
         numb_fp = df_classif[df_classif['category'] == 'FP'].shape[0]
         numb_tp = df_classif[df_classif['category'] == 'TP'].shape[0]
-        weighted_tp = np.sum(df_classif[df_classif['category']=='TP']['weight'])
         # compute FN by taking the nr of ref elements minus the nr of TPs
         numb_fn = np.max(label_ref) - numb_tp
-        # Check if this is the same amount as elements iterated over for the FN weight
-        if nr_fn != numb_fn:
-            print("WARNING: Error problem with number of FN elements!")
 
-        return (2 * weighted_tp) / (weighted_fn + numb_fp + 2 * weighted_tp)
-        # return (2 * numb_tp * weights_tp) / (numb_fn * weight_fn + numb_fp + 2 * numb_tp * weights_tp)
+        return (2 * numb_tp) / (numb_fn + numb_fp + 2 * numb_tp)
 
     def errormaps_elements(self):
         """

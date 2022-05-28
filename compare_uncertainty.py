@@ -9,6 +9,7 @@ import sys
 import pandas as pd
 import argparse
 from evaluation_comparison.pairwise_measures import PairwiseMeasures
+from evaluation_comparison.pairwise_uncertainty import PairwiseUncertainty
 from evaluation_comparison.pairwise_measures import MorphologyOps
 from nifty_utils.file_utils import (create_name_save, reorder_list_presuf)
 import pathlib
@@ -36,17 +37,8 @@ import pathlib
 
 DICT_MEASURES = {}
 
-DICT_MEASURES['epvs'] = ('absolute_count_difference', 'f1_score', 'mean_diceover', 'absolute_volume_difference',)
-DICT_MEASURES['lacunes'] = ('f1_score', 'mean_diceover', 'absolute_volume_difference')
-DICT_MEASURES['microbleeds'] = ('absolute_count_difference', 'f1_score', 'mean_diceover', 'absolute_volume_difference')
-DICT_MEASURES['demographic_iou'] = ('count_ref','count_seg','count_difference','vol_ref','vol_seg','vol_difference',
-                                    'median_vol_ref',' min_vol_ref', 'max_vol_ref', 'median_vol_seg', 'min_vol_seg',
-                                    'max_vol_seg', 'numb_tp','numb_fp','numb_fn','disagreement_vol_raters','disagreement_numb_raters',
-                                    'overall_dsc')
-DICT_MEASURES['demographic_dist'] = ('count_ref','count_seg','count_difference','vol_ref','vol_seg','vol_difference',
-                                    'median_vol_ref','min_vol_ref', 'max_vol_ref', 'median_vol_seg', 'min_vol_seg',
-                                    'max_vol_seg', 'numb_tp','numb_fp','numb_fn','disagreement_vol_raters','disagreement_numb_raters',
-                                    'overall_dsc')
+DICT_MEASURES['lacunes'] = ('f1_count_uncert', 'mean_dsc_uncertainty','f1_count_uncert_seg', 'mean_dsc_uncertainty_seg')
+
 # MEASURES_STREAMS = ('prob_match', 'summary_match')
 
 # MEASURES_NEW = ('ref volume', 'seg volume', 'tp', 'fp', 'fn', 'outline_error',
@@ -56,14 +48,16 @@ OUTPUT_FILE_PREFIX = 'PairwiseMeasure'
 
 
 class Parameters:
-    def __init__(self, seg_path, ref_path, seg_exp, ref_exp, save_name, out_path='',
+    def __init__(self, seg_path, ref_path, uncert_path, seg_exp, ref_exp, uncert_exp, save_name, out_path='',
                  threshold=0.5, task='epvs', step=0.1, save_maps=True, connectivity=3, thresh_assign=0.1):
         self.save_name = save_name
         self.threshold = threshold
         self.ref_path = ref_path
         self.seg_path = seg_path
+        self.uncert_path = uncert_path
         self.ref_exp = ref_exp
         self.seg_exp = seg_exp
+        self.uncert_exp = uncert_exp
         self.task = task
         self.step = step
         self.save_maps = save_maps
@@ -74,7 +68,7 @@ class Parameters:
 
 def run_compare(param):
     # prepare save name output csv file, assure no files are overwritten
-    list_format = [param.seg_path, param.ref_path]
+    list_format = [param.seg_path, param.ref_path, param.uncert_path]
     if param.out_path != '':
         dir_init = param.out_path
     else:
@@ -96,13 +90,17 @@ def run_compare(param):
     # get input files for segmentation (predictions) and ref (raters annotations)
     seg_names_init = glob.glob("/".join(param.seg_path.parts)+os.path.sep+param.seg_exp)
     ref_names_init = glob.glob("/".join(param.ref_path.parts)+os.path.sep+param.ref_exp)
+    uncert_names_init = glob.glob("/".join(param.uncert_path.parts) + os.path.sep + param.uncert_exp)
+
     seg_names = []
     ref_names = []
+    uncert_names = []
     # seg_names = util.list_files(param.seg_dir, param.ext)
     # ref_names = util.list_files(param.ref_dir, param.ext)
 
     # matching files on subject
     ind_s, ind_r = reorder_list_presuf(seg_names_init, ref_names_init)
+    ind_su, ind_u = reorder_list_presuf(seg_names_init, uncert_names_init)
     print(len(ind_s))
     for i in range(0, len(ind_s)):
         if ind_s[i] > -1:
@@ -111,17 +109,18 @@ def run_compare(param):
                 ind_s[i]])
             seg_names.append(seg_names_init[i])
             ref_names.append(ref_names_init[ind_s[i]])
-    pair_list = list(zip(seg_names, ref_names))
+            uncert_names.append(uncert_names_init[ind_su[i]])
+    pair_list = list(zip(seg_names, ref_names, uncert_names))
     # import itertools
     # pair_list = list(itertools.product(seg_names, ref_names))
     print("List of references is {}".format(ref_names))
     print("List of segmentations is {}".format(seg_names))
-
+    print("List of uncertainty maps is {}".format(seg_names))
     # prepare a header for csv
     with open(os.path.join(dir_init, out_name), 'w+') as out_stream:
 
         # a trivial PairwiseMeasures obj to produce header_str
-        m_headers = PairwiseMeasures(0, 0,
+        m_headers = PairwiseUncertainty(0, 0,0,
                                      measures=DICT_MEASURES[param.task], analysis=param.task,
                                      connectivity=param.connectivity, empty=True,
                                      thresh_assign=param.thresh_assign).header_str()
@@ -135,16 +134,21 @@ def run_compare(param):
             _, seg_namefin = os.path.split(seg_name)
             ref_name = pair_[1]
             _, ref_namefin = os.path.split(ref_name)
+            uncert_name = pair_[2]
+            _, uncert_namefin = os.path.split(uncert_name)
             print('>>> {} of {} evaluations, comparing {} and {}.'.format(
                 i + 1, len(pair_list), ref_name, seg_name))
             seg_nii = nib.load(seg_name)
             ref_nii = nib.load(ref_name)
+            uncert_nii = nib.load(uncert_name)
+
 
             # get voxel spacing/size
             voxel_sizes = seg_nii.header.get_zooms()[0:3]
 
             seg = np.squeeze(seg_nii.get_data())
             ref = ref_nii.get_data()
+            uncert = np.squeeze(uncert_nii.get_data())
 
             # check image size and intensity range, if not correct skip this case
             if not seg.shape == ref.shape:
@@ -168,7 +172,7 @@ def run_compare(param):
             # Create and save nii files of map of differences (FP FN TP OEMap
             #  DE if flag_save_map is on and binary segmentation
 
-            pe = PairwiseMeasures(ref_img=ref, seg_img=seg, analysis=param.task, measures=measures_fin,
+            pe = PairwiseUncertainty(ref_img=ref, uncert_img=uncert, seg_img=seg, analysis=param.task, measures=measures_fin,
                                   connectivity=param.connectivity, pixdim=voxel_sizes, empty=True,
                                   threshold=param.threshold, thresh_assign=param.thresh_assign)
 
@@ -212,12 +216,18 @@ def main(argv):
     parser.add_argument('-seg_path', dest='seg_path', metavar='seg pattern',
                         type=pathlib.Path, required=True, nargs='+',
                         help='RegExp pattern for the segmentation (prediction) files')
+    parser.add_argument('-uncert_path', dest='uncert_path', metavar='uncert pattern',
+                        type=pathlib.Path, required=True, nargs='+',
+                        help='RegExp pattern for the uncertainty (prediction) files')
     parser.add_argument('-ref_path', dest='ref_path', action='store',
                         default='', type=pathlib.Path,
                         help='RegExp pattern for the reference (annotator) files')
     parser.add_argument('-seg_exp', dest='seg_exp', metavar='seg pattern',
                         type=str, required=True,
                         help='RegExp pattern for the segmentation (prediction) files')
+    parser.add_argument('-uncert_exp', dest='uncert_exp', metavar='seg pattern',
+                        type=str, required=True,
+                        help='RegExp pattern for the uncertainty (prediction) files')
     parser.add_argument('-ref_exp', dest='ref_exp', action='store',
                         default='', type=str,
                         help='RegExp pattern for the reference (annotator) files')
@@ -226,7 +236,7 @@ def main(argv):
     parser.add_argument('-m', dest='min_assign', action='store', default=0.1,
                         type=float)
     parser.add_argument('-task', dest='task', action='store', type=str,
-                        default='epvs', choices=['lacunes', 'microbleeds', 'epvs','demographic_iou','demographic_dist'])
+                        default='epvs', choices=['lacunes', 'microbleeds', 'epvs', ])
     parser.add_argument('-out_path', dest='out_path', action='store',
                         default='', help='path where to save results')
     parser.add_argument('-save_name', dest='save_name', action='store',
@@ -247,8 +257,9 @@ def main(argv):
 
         sys.exit(2)
 
-    param = Parameters(seg_path=args.seg_path[0], ref_path=args.ref_path, seg_exp=args.seg_exp,
-                       ref_exp=args.ref_exp,
+    param = Parameters(seg_path=args.seg_path[0], ref_path=args.ref_path, uncert_path=args.uncert_path[0],
+                       seg_exp=args.seg_exp,
+                       ref_exp=args.ref_exp, uncert_exp=args.uncert_exp,
                        threshold=args.threshold,
                        save_name=args.save_name, task=args.task, out_path=args.out_path,
                        save_maps=args.save_maps, connectivity=args.connectivity, thresh_assign=args.min_assign)
