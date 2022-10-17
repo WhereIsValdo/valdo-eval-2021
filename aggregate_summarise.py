@@ -31,7 +31,7 @@ def summary_stats(df_aggregated):
 
 def main(argv):
 
-    parser = argparse.ArgumentParser(description='Completion  procedure')
+    parser = argparse.ArgumentParser(description='Aggregation  procedure')
     parser.add_argument('-reg_exp', dest='reg_exp', metavar='file with the database of results',
                         type=str, required=True,
                         help='File to read the data from')
@@ -45,7 +45,7 @@ def main(argv):
         args = parser.parse_args(argv)
 
     except getopt.GetoptError:
-        print('ranking_comparison.py -id <ids with ref> -f <file to complete> -path_out <path where to save completed output> -prefix <prefix to add to indicate completion> ')
+        print('aggregate_summarise.py -reg_exp <regular_expression for files to aggregate> -name_out <name> -path_out <path where to save completed output> ')
         sys.exit(2)
 
     list_files = glob.glob(args.reg_exp)
